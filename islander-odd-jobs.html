@@ -742,13 +742,37 @@
 
 </div>
 
-<script>
-  const STORAGE_KEY = 'islander-jobs-list';
-  const USERS_KEY = 'islander-users';
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+  import {
+    getFirestore, collection, doc, setDoc, getDoc, getDocs, updateDoc, deleteDoc
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBgQYHQDX-rYQfgm6uXDLXj20wg2zvsdXc",
+    authDomain: "islander-odd-jobs.firebaseapp.com",
+    projectId: "islander-odd-jobs",
+    storageBucket: "islander-odd-jobs.firebasestorage.app",
+    messagingSenderId: "630911686039",
+    appId: "1:630911686039:web:40113e258bf6fd4af1e0d2"
+  };
+  const fbApp = initializeApp(firebaseConfig);
+  const auth = getAuth(fbApp);
+  const db = getFirestore(fbApp);
+
+  // Firebase Auth needs an email — customers only ever see "username",
+  // so we turn it into a fake email behind the scenes, consistently.
+  function usernameToEmail(username) {
+    return username.toLowerCase().trim() + '@islanderapp.local';
+  }
+
   let jobsCache = [];
 
   let isOwner = false;
-  let session = { name: '', phone: '', address: '', username: '' };
+  let session = { name: '', phone: '', address: '', username: '', uid: '' };
 
   // ---------- Tabs (post / browse / my jobs — owner has no tabs) ----------
   document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -763,41 +787,21 @@
     if (name === 'myjobs') renderMyJobs();
   }
 
-  // ---------- User account storage ----------
-  async function loadUsers() {
-    try {
-      const res = await window.storage.get(USERS_KEY, true);
-      return res && res.value ? JSON.parse(res.value) : {};
-    } catch (e) {
-      return {};
-    }
-  }
-
-  async function saveUsers(users) {
-    try {
-      const res = await window.storage.set(USERS_KEY, JSON.stringify(users), true);
-      return !!res;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  // ---------- Storage helpers ----------
+  // ---------- Jobs storage (Firestore) ----------
   async function loadJobs() {
     try {
-      const res = await window.storage.get(STORAGE_KEY, true);
-      jobsCache = res && res.value ? JSON.parse(res.value) : [];
+      const snap = await getDocs(collection(db, 'jobs'));
+      jobsCache = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     } catch (e) {
       jobsCache = [];
     }
     return jobsCache;
   }
 
-  async function saveJobs(jobs) {
-    jobsCache = jobs;
+  async function saveJob(job) {
     try {
-      const res = await window.storage.set(STORAGE_KEY, JSON.stringify(jobs), true);
-      if (!res) throw new Error('no result');
+      const { id, ...data } = job;
+      await setDoc(doc(db, 'jobs', id), data);
       return true;
     } catch (e) {
       return false;
@@ -849,9 +853,7 @@
       createdAt: Date.now()
     };
 
-    const jobs = await loadJobs();
-    jobs.unshift(job);
-    const ok = await saveJobs(jobs);
+    const ok = await saveJob(job);
 
     submitBtn.disabled = false;
     submitBtn.textContent = 'Post the job';
@@ -938,32 +940,35 @@
     const key = username.toLowerCase();
 
     if (!username || !password) {
+      errorEl.textContent = "That username and password don't match.";
       shakeAndError('#login-card', errorEl);
       return;
     }
 
     btn.disabled = true;
     btn.textContent = 'Logging in…';
-    const users = await loadUsers();
-    btn.disabled = false;
-    btn.textContent = 'Log In';
 
-    const user = users[key];
-    if (!user || user.password !== password) {
+    try {
+      const cred = await signInWithEmailAndPassword(auth, usernameToEmail(key), password);
+      const snap = await getDoc(doc(db, 'users', cred.user.uid));
+      const profile = snap.exists() ? snap.data() : { name: username, phone: '', address: '' };
+
+      errorEl.style.display = 'none';
+      session = { name: profile.name, phone: profile.phone, address: profile.address, username: key, uid: cred.user.uid };
+      isOwner = false;
+
+      document.getElementById('signin-wrap').style.display = 'none';
+      document.getElementById('app-wrap').style.display = 'block';
+      document.getElementById('tabbar').style.display = 'flex';
+      document.getElementById('session-label').textContent = 'Signed in as ' + profile.name;
+      switchTab('post');
+    } catch (e) {
       errorEl.textContent = "That username and password don't match.";
       shakeAndError('#login-card', errorEl);
-      return;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Log In';
     }
-
-    errorEl.style.display = 'none';
-    session = { name: user.name, phone: user.phone, address: user.address, username: key };
-    isOwner = false;
-
-    document.getElementById('signin-wrap').style.display = 'none';
-    document.getElementById('app-wrap').style.display = 'block';
-    document.getElementById('tabbar').style.display = 'flex';
-    document.getElementById('session-label').textContent = 'Signed in as ' + user.name;
-    switchTab('post');
   }
 
   document.getElementById('signup-btn').addEventListener('click', trySignup);
@@ -993,36 +998,33 @@
 
     btn.disabled = true;
     btn.textContent = 'Creating…';
-    const users = await loadUsers();
 
-    if (users[key]) {
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, usernameToEmail(key), password);
+      await setDoc(doc(db, 'users', cred.user.uid), { name, phone, address, username: key });
+
+      errorEl.style.display = 'none';
+      session = { name, phone, address, username: key, uid: cred.user.uid };
+      isOwner = false;
+
+      document.getElementById('signin-wrap').style.display = 'none';
+      document.getElementById('app-wrap').style.display = 'block';
+      document.getElementById('tabbar').style.display = 'flex';
+      document.getElementById('session-label').textContent = 'Signed in as ' + name;
+      switchTab('post');
+    } catch (e) {
+      if (e.code === 'auth/email-already-in-use') {
+        errorEl.textContent = 'That username is already taken — try another.';
+      } else if (e.code === 'auth/weak-password') {
+        errorEl.textContent = 'Choose a password with at least 6 characters.';
+      } else {
+        errorEl.textContent = 'Something went wrong creating your account — try again.';
+      }
+      shakeAndError('#signup-card', errorEl);
+    } finally {
       btn.disabled = false;
       btn.textContent = 'Create Account';
-      errorEl.textContent = 'That username is already taken — try another.';
-      shakeAndError('#signup-card', errorEl);
-      return;
     }
-
-    users[key] = { name, phone, address, password };
-    const ok = await saveUsers(users);
-    btn.disabled = false;
-    btn.textContent = 'Create Account';
-
-    if (!ok) {
-      errorEl.textContent = 'Something went wrong creating your account — try again.';
-      shakeAndError('#signup-card', errorEl);
-      return;
-    }
-
-    errorEl.style.display = 'none';
-    session = { name, phone, address, username: key };
-    isOwner = false;
-
-    document.getElementById('signin-wrap').style.display = 'none';
-    document.getElementById('app-wrap').style.display = 'block';
-    document.getElementById('tabbar').style.display = 'flex';
-    document.getElementById('session-label').textContent = 'Signed in as ' + name;
-    switchTab('post');
   }
 
   function shakeAndError(cardSelector, errorEl) {
@@ -1089,9 +1091,10 @@
     }
   }
 
-  document.getElementById('logout-btn').addEventListener('click', () => {
+  document.getElementById('logout-btn').addEventListener('click', async () => {
     isOwner = false;
-    session = { name: '', phone: '', address: '', username: '' };
+    session = { name: '', phone: '', address: '', username: '', uid: '' };
+    try { await signOut(auth); } catch (e) {}
     document.getElementById('app-wrap').style.display = 'none';
     document.getElementById('signin-wrap').style.display = 'block';
     document.getElementById('signup-card').style.display = 'none';
@@ -1175,22 +1178,18 @@
   }
 
   async function handleOwnerAction(action, id) {
-    const jobs = await loadJobs();
-    const job = jobs.find(j => j.id === id);
-    if (!job) return;
-
-    if (action === 'accept') {
-      job.status = 'accepted';
-      job.acceptedBy = session.name || 'Crew';
-    } else if (action === 'complete') {
-      job.status = 'complete';
-    } else if (action === 'delete') {
-      if (!confirm('Delete this job posting for good?')) return;
-      const idx = jobs.findIndex(j => j.id === id);
-      jobs.splice(idx, 1);
+    try {
+      if (action === 'accept') {
+        await updateDoc(doc(db, 'jobs', id), { status: 'accepted', acceptedBy: session.name || 'Crew' });
+      } else if (action === 'complete') {
+        await updateDoc(doc(db, 'jobs', id), { status: 'complete' });
+      } else if (action === 'delete') {
+        if (!confirm('Delete this job posting for good?')) return;
+        await deleteDoc(doc(db, 'jobs', id));
+      }
+    } catch (e) {
+      alert('Something went wrong — please try again.');
     }
-
-    await saveJobs(jobs);
     renderOwner();
   }
 
